@@ -4,8 +4,10 @@ pragma solidity 0.8.15;
 import {AggregatorV2V3Interface} from "interfaces/AggregatorV2V3Interface.sol";
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import {Owned} from "solmate/auth/Owned.sol";
 
-import {FullMath} from "libraries/FullMath.sol";
+
+// TODO add in balancer oracle feed
 
 /* ========== ERRORS =========== */
 error Price_InvalidParams();
@@ -13,8 +15,7 @@ error Price_NotInitialized();
 error Price_AlreadyInitialized();
 error Price_BadFeed(address priceFeed);
 
-contract OlympusPrice {
-    using FullMath for uint256;
+contract SMA is Owned {
 
     /* ========== EVENTS =========== */
     event NewObservation(uint256 timestamp, uint256 price);
@@ -65,7 +66,7 @@ contract OlympusPrice {
         AggregatorV2V3Interface reserveEthPriceFeed_,
         uint48 observationFrequency_,
         uint48 movingAverageDuration_
-    ) {
+    ) Owned(msg.sender) {
         /// @dev Moving Average Duration should be divisible by Observation Frequency to get a whole number of observations
         if (
             movingAverageDuration_ == 0 ||
@@ -191,7 +192,7 @@ contract OlympusPrice {
     function initialize(
         uint256[] memory startObservations_,
         uint48 lastObservationTime_
-    ) external permissioned {
+    ) external {
         /// Revert if already initialized
         if (initialized) revert Price_AlreadyInitialized();
 
@@ -228,7 +229,6 @@ contract OlympusPrice {
     ///      the existing data and can re-populate before calling this function.
     function changeMovingAverageDuration(uint48 movingAverageDuration_)
         external
-        permissioned
     {
         /// Moving Average Duration should be divisible by Observation Frequency to get a whole number of observations
         if (
@@ -259,7 +259,6 @@ contract OlympusPrice {
     ///           Ensure that you have saved the existing data and/or can re-populate before calling this function.
     function changeObservationFrequency(uint48 observationFrequency_)
         external
-        permissioned
     {
         /// Moving Average Duration should be divisible by Observation Frequency to get a whole number of observations
         if (

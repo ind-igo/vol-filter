@@ -1,2 +1,15 @@
+[default]
+solc_version = "0.8.15"
+remappings = [
+    'ds-test/=lib/solmate/lib/ds-test/src/',
+    'forge-std/=lib/forge-std/src/',
+    'prb-test/=lib/prb-test/src/',
+    'solmate/=lib/solmate/src/',
+
+    'interfaces/=src/interfaces',
+    'lib/=src/lib'
+]
+
+
 [ci]
 fuzz-runs = 10_000
