@@ -2,7 +2,7 @@
 pragma solidity 0.8.15;
 
 import {AggregatorV2V3Interface} from "interfaces/AggregatorV2V3Interface.sol";
-
+import {PRBMathUD60x18} from "prb-math/PRBMathUD60x18.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {Owned} from "solmate/auth/Owned.sol";
 
@@ -15,7 +15,8 @@ error Price_NotInitialized();
 error Price_AlreadyInitialized();
 error Price_BadFeed(address priceFeed);
 
-contract SMA is Owned {
+contract Indicators is Owned {
+    using PRBMathUD60x18 for uint256;
 
     /* ========== EVENTS =========== */
     event NewObservation(uint256 timestamp, uint256 price);
@@ -29,6 +30,10 @@ contract SMA is Owned {
 
     /// Moving average data
     uint256 internal _movingAverage; /// See getMovingAverage()
+
+    // M2 is the sum of the squared differences between the current observation and the moving average.
+    // Used to calculate the standard deviation.
+    uint256 internal _m2;
 
     /// @notice Array of price observations. Check nextObsIndex to determine latest data point.
     /// @dev    Observations are stored in a ring buffer where the moving average is the sum of all observations divided by the number of observations.
@@ -97,36 +102,31 @@ contract SMA is Owned {
         /// nextObsIndex is initialized to 0
     }
 
-    /// @notice Trigger an update of the moving average
-    /// @notice Access restricted to approved policies
+    /// @notice Trigger an update of price indicators (moving average, variance and std dev)
     /// @dev This function does not have a time-gating on the observationFrequency on this contract. It is set on the Heart policy contract.
     ///      The Heart beat frequency should be set to the same value as the observationFrequency.
-    function updateMovingAverage() external {
-        /// Revert if not initialized
+    // Calculate indicators (simple moving average, variance and std dev) using Welford's Algorithm
+    // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+    function updateIndicators() external {
         if (!initialized) revert Price_NotInitialized();
 
-        /// Cache numbe of observations to save gas.
         uint32 numObs = numObservations;
-
-        /// Get earliest observation in window
+        // Get earliest observation in window
         uint256 earliestPrice = observations[nextObsIndex];
-
-        /// Get current price
         uint256 currentPrice = getCurrentPrice();
 
-        /// Calculate new moving average
-        if (currentPrice > earliestPrice) {
-            _movingAverage += (currentPrice - earliestPrice) / numObs;
-        } else {
-            _movingAverage -= (earliestPrice - currentPrice) / numObs;
-        }
+        uint256 diff = currentPrice > earliestPrice
+            ? currentPrice - earliestPrice
+            : earliestPrice - currentPrice;
+
+        // Calculate moving average and variance with new price data
+        (_movingAverage, _m2) = _computeAverageAndM2(numObs, _movingAverage, _m2, diff);
 
         /// Push new observation into storage and store timestamp taken at
         observations[nextObsIndex] = currentPrice;
         lastObservationTime = uint48(block.timestamp);
         nextObsIndex = (nextObsIndex + 1) % numObs;
 
-        /// Emit event
         emit NewObservation(block.timestamp, currentPrice);
     }
 
@@ -181,6 +181,12 @@ contract SMA is Owned {
         return _movingAverage;
     }
 
+    function getStandardDeviation() external view returns (uint256) {
+        /// Revert if not initialized
+        if (!initialized) revert Price_NotInitialized();
+        return PRBMathUD60x18.sqrt(_m2 / (numObservations - 1));
+    }
+
     /* ========== ADMIN FUNCTIONS ========== */
 
     /// @notice                     Initialize the price module
@@ -206,20 +212,61 @@ contract SMA is Owned {
         ) revert Price_InvalidParams();
 
         /// Push start observations into storage and total up observations
-        uint256 total;
+        //uint256 total;
+        //for (uint256 i; i < numObs; ) {
+        //    if (startObservations_[i] == 0) revert Price_InvalidParams();
+        //    total += startObservations_[i];
+        //    observations[i] = startObservations_[i];
+        //    unchecked {
+        //        ++i;
+        //    }
+        //}
+
+        //uint256 counter;
+        //uint256 avg;
+        //uint256 variance;
+        //for (uint256 i; i < numObs; ) {
+        //    if (startObservations_[i] == 0) revert Price_InvalidParams();
+        //    counter += 1;
+        //    (avg, variance) = _computeMovingAverageAndVariance(
+        //        counter,
+        //        avg,
+        //        variance,
+        //        startObservations_[i]
+        //    );
+        //    observations[i] = startObservations_[i];
+        //    unchecked {
+        //        ++i;
+        //    }
+        //}
+
+        uint256 counter;
+        uint256 avg;
+        uint256 m2;
         for (uint256 i; i < numObs; ) {
-            if (startObservations_[i] == 0) revert Price_InvalidParams();
-            total += startObservations_[i];
-            observations[i] = startObservations_[i];
+            uint256 obs = startObservations_[i];
+            if (obs == 0) revert Price_InvalidParams();
+
+            counter += 1;
+            (avg, m2) = _computeAverageAndM2(counter, avg, m2, obs);
+            observations[i] = obs;
             unchecked {
                 ++i;
             }
         }
 
-        /// Set moving average, last observation time, and initialized flag
-        _movingAverage = total / numObs;
+        // initialize state
+        _movingAverage = avg;
+        _m2 = m2;
         lastObservationTime = lastObservationTime_;
         initialized = true;
+    }
+
+    // M2 is the sum of the squared differences between the current observation and the moving average.
+    function _computeAverageAndM2(uint256 counter_, uint256 avg_, uint256 m2_, uint256 diff_) internal pure returns (uint256 newAvg, uint256 newM2) {
+        uint256 delta = diff_ - avg_;
+        newAvg = avg_ + delta / counter_;
+        newM2 = m2_ + delta * (diff_ - newAvg);
     }
 
     /// @notice                         Change the moving average window (duration)
@@ -245,12 +292,8 @@ contract SMA is Owned {
         observations = new uint256[](newObservations);
 
         /// Set initialized to false and update state variables
-        initialized = false;
-        lastObservationTime = 0;
-        _movingAverage = 0;
-        nextObsIndex = 0;
+        _resetState();
         movingAverageDuration = movingAverageDuration_;
-        numObservations = uint32(newObservations);
     }
 
     /// @notice   Change the observation frequency of the moving average (i.e. how often a new observation is taken)
@@ -281,11 +324,38 @@ contract SMA is Owned {
         observations = new uint256[](newObservations);
 
         /// Set initialized to false and update state variables
+        _resetState();
+        observationFrequency = observationFrequency_;
+    }
+
+    // Reset common state variables
+    function _resetState() internal {
         initialized = false;
         lastObservationTime = 0;
         _movingAverage = 0;
+        _m2 = 0;
         nextObsIndex = 0;
-        observationFrequency = observationFrequency_;
-        numObservations = uint32(newObservations);
+        numObservations = uint32(observations.length);
     }
+
+    // Use Welford's Algorithm to update the moving average and variance
+    // More info: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+    // Adapted from https://www.adamsmith.haus/python/answers/how-to-find-a-running-standard-deviation-in-python
+    function _computeMovingAverageAndVariance(
+        uint256 count_,
+        uint256 avg_,
+        uint256 variance_,
+        uint256 newData_
+    )
+    internal
+    pure
+    returns (
+        uint256 newAvg,
+        uint256 newVariance
+    ) {
+        newAvg = avg_ + (newData_ - avg_) / count_;
+        newVariance = variance_ + (newData_ - avg_) * (newData_ - newAvg);
+    }
+
+
 }

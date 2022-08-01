@@ -5,6 +5,7 @@ remappings = [
     'forge-std/=lib/forge-std/src/',
     'prb-test/=lib/prb-test/src/',
     'solmate/=lib/solmate/src/',
+    'prb-math/=lib/prb-math/contracts/',
 
     'interfaces/=src/interfaces',
     'lib/=src/lib'
