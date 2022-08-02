@@ -1,27 +1,36 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.15;
 
-import {PRBMathUD60x18} from "prb-math/PRBMathUD60x18.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {Owned} from "solmate/auth/Owned.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 import {Indicators} from "./Indicators.sol";
 
 error VolFilter_InvalidParam();
 
 contract VolFilter is Owned {
-    using PRBMathUD60x18 for uint256;
+    using FixedPointMathLib for uint256;
 
     Indicators public indicators;
 
-    // Capacity for epoch
+    // Epoch duration
     uint256 public epochCapacity;
+    
+    // Amount of DAI to sell
+    uint256 public bidCapacity;
 
-    // Bollinger Bands parameters
-    uint256 public bbandMultiple; // Between 1 and 3
+    // Amount of OHM to sell
+    uint256 public askCapacity;
 
-    // Threshold of %Band to trigger a buy/sell. Out of 100.
-    uint256 public minimumThreshold;
+    // Bollinger Bands multiple. Defines maximum standard deviations that system will respond to. Must be <3.
+    uint256 public bbandMultiple;
+
+    // Threshold of %Band to trigger a buy/sell. Out of 100. 1e4. 50% +/- minPctThreshold
+    uint256 public minPctThreshold;
+    uint256 public constant HUNDRED_PCT = 100e4;
+    uint256 public constant FIFTY_PCT = 50e4;
+    uint256 public constant PCT_UNITS = 1e4;
 
     constructor(Indicators indicators_) Owned(msg.sender) {
         indicators = indicators_;
@@ -39,12 +48,25 @@ contract VolFilter is Owned {
         uint256 lowerBand = sma - (stdDev * bbandMultiple);
 
         // Calculate %Band of current price
-        uint256 percentBand = (currentPrice - lowerBand) / (upperBand - lowerBand);
+        uint256 pctBandOfPrice = ((currentPrice - lowerBand) / (upperBand - lowerBand)) * 1e4;
+        if (pctBandOfPrice > HUNDRED_PCT) pctBandOfPrice = HUNDRED_PCT;
+        
+        // Check if current price is above minimum threshold above/below SMA to trigger market ops
+        // If in top range (>50%), sell OHM. Otherwise, buy OHM.
+        uint256 order;
+        bool isBid;
+        if (pctBandOfPrice > FIFTY_PCT + minPctThreshold) {
+            uint256 capacityPct = (pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
+            order = askCapacity * capacityPct / PCT_UNITS;
 
-        // TODO too tired. revisit
-        if (percentBand < minimumThreshold) {
-            // TODO
+            // TODO initiate OHM sell order for order amount until next epoch
         }
+        else if (pctBandOfPrice < FIFTY_PCT - minPctThreshold) {
+            uint256 capacityPct = (HUNDRED_PCT - pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
+            order = bidCapacity * capacityPct / PCT_UNITS;
+            isBid = true;
+        }
+
         // Trigger buy/sell if %Band is below threshold
     }
 
@@ -52,13 +74,23 @@ contract VolFilter is Owned {
         epochCapacity = epochCapacity_;
     }
 
+    // Denominated in OHM (9 decimals)
+    function setBidCapacity(uint256 bidCapacity_) public onlyOwner {
+        bidCapacity = bidCapacity_;
+    }
+
+    // Denominated in DAI (18 decimals)
+    function setAskCapacity(uint256 askCapacity_) public onlyOwner {
+        askCapacity = askCapacity_;
+    }
+
     function setBands(uint256 multiple_) external onlyOwner {
         if (multiple_ < 1 || multiple_ > 3) revert VolFilter_InvalidParam();
         bbandMultiple = multiple_;
     }
 
-    function setThreshold(uint256 threshold_) external onlyOwner {
-        if (threshold_ > 100) revert VolFilter_InvalidParam();
-        minimumThreshold = threshold_;
+    function setMinPctThreshold(uint256 minPct_) external onlyOwner {
+        if (minPct_ > 100e4) revert VolFilter_InvalidParam();
+        minPctThreshold = minPct_;
     }
 }

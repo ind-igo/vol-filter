@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.15;
 
-import {AggregatorV2V3Interface} from "interfaces/AggregatorV2V3Interface.sol";
-import {PRBMathUD60x18} from "prb-math/PRBMathUD60x18.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {Owned} from "solmate/auth/Owned.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
+import {AggregatorV2V3Interface} from "interfaces/AggregatorV2V3Interface.sol";
 
 // TODO add in balancer oracle feed
 
@@ -15,8 +15,10 @@ error Price_NotInitialized();
 error Price_AlreadyInitialized();
 error Price_BadFeed(address priceFeed);
 
+/// @notice Storage of price indicators (price, simple moving average, standard deviation)
+/// @dev Welford's Algorithm: https://w.wiki/rcG
 contract Indicators is Owned {
-    using PRBMathUD60x18 for uint256;
+    using FixedPointMathLib for uint256;
 
     /* ========== EVENTS =========== */
     event NewObservation(uint256 timestamp, uint256 price);
@@ -181,10 +183,12 @@ contract Indicators is Owned {
         return _movingAverage;
     }
 
+    // Use Welford's Algorithm to calculate the standard deviation from M2
+    // More info: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
     function getStandardDeviation() external view returns (uint256) {
         /// Revert if not initialized
         if (!initialized) revert Price_NotInitialized();
-        return PRBMathUD60x18.sqrt(_m2 / (numObservations - 1));
+        return (_m2 / (numObservations - 1)).sqrt();
     }
 
     /* ========== ADMIN FUNCTIONS ========== */
@@ -211,44 +215,13 @@ contract Indicators is Owned {
             lastObservationTime_ > uint48(block.timestamp)
         ) revert Price_InvalidParams();
 
-        /// Push start observations into storage and total up observations
-        //uint256 total;
-        //for (uint256 i; i < numObs; ) {
-        //    if (startObservations_[i] == 0) revert Price_InvalidParams();
-        //    total += startObservations_[i];
-        //    observations[i] = startObservations_[i];
-        //    unchecked {
-        //        ++i;
-        //    }
-        //}
-
-        //uint256 counter;
-        //uint256 avg;
-        //uint256 variance;
-        //for (uint256 i; i < numObs; ) {
-        //    if (startObservations_[i] == 0) revert Price_InvalidParams();
-        //    counter += 1;
-        //    (avg, variance) = _computeMovingAverageAndVariance(
-        //        counter,
-        //        avg,
-        //        variance,
-        //        startObservations_[i]
-        //    );
-        //    observations[i] = startObservations_[i];
-        //    unchecked {
-        //        ++i;
-        //    }
-        //}
-
-        uint256 counter;
         uint256 avg;
         uint256 m2;
         for (uint256 i; i < numObs; ) {
             uint256 obs = startObservations_[i];
             if (obs == 0) revert Price_InvalidParams();
 
-            counter += 1;
-            (avg, m2) = _computeAverageAndM2(counter, avg, m2, obs);
+            (avg, m2) = _computeAverageAndM2(i+1, avg, m2, obs);
             observations[i] = obs;
             unchecked {
                 ++i;
@@ -260,13 +233,6 @@ contract Indicators is Owned {
         _m2 = m2;
         lastObservationTime = lastObservationTime_;
         initialized = true;
-    }
-
-    // M2 is the sum of the squared differences between the current observation and the moving average.
-    function _computeAverageAndM2(uint256 counter_, uint256 avg_, uint256 m2_, uint256 diff_) internal pure returns (uint256 newAvg, uint256 newM2) {
-        uint256 delta = diff_ - avg_;
-        newAvg = avg_ + delta / counter_;
-        newM2 = m2_ + delta * (diff_ - newAvg);
     }
 
     /// @notice                         Change the moving average window (duration)
@@ -338,24 +304,10 @@ contract Indicators is Owned {
         numObservations = uint32(observations.length);
     }
 
-    // Use Welford's Algorithm to update the moving average and variance
-    // More info: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-    // Adapted from https://www.adamsmith.haus/python/answers/how-to-find-a-running-standard-deviation-in-python
-    function _computeMovingAverageAndVariance(
-        uint256 count_,
-        uint256 avg_,
-        uint256 variance_,
-        uint256 newData_
-    )
-    internal
-    pure
-    returns (
-        uint256 newAvg,
-        uint256 newVariance
-    ) {
-        newAvg = avg_ + (newData_ - avg_) / count_;
-        newVariance = variance_ + (newData_ - avg_) * (newData_ - newAvg);
+    // M2 is the sum of the squared differences between the current observation and the moving average.
+    function _computeAverageAndM2(uint256 counter_, uint256 avg_, uint256 m2_, uint256 diff_) internal pure returns (uint256 newAvg, uint256 newM2) {
+        uint256 delta = diff_ - avg_;
+        newAvg = avg_ + delta / counter_;
+        newM2 = m2_ + delta * (diff_ - newAvg);
     }
-
-
 }
