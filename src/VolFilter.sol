@@ -5,7 +5,16 @@ import {ERC20} from "solmate/tokens/ERC20.sol";
 import {Owned} from "solmate/auth/Owned.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
+import {IUniswapV2PairPartialV5} from "./interfaces/IUniswapV2PairPartialV5.sol";
 import {Indicators} from "./Indicators.sol";
+
+interface IMINTR {
+    function mintTo(address to_, uint256 amount_) external;
+}
+
+interface ITRSRY {
+    function withdrawReserves(address to_, ERC20 token_, uint256 amount_) external;
+}
 
 error VolFilter_InvalidParam();
 
@@ -13,9 +22,18 @@ contract VolFilter is Owned {
     using FixedPointMathLib for uint256;
 
     Indicators public indicators;
+    IUniswapV2PairPartialV5 public pair; // 0 = OHM, 1 = DAI
+    IMINTR public MINTR;
+    ITRSRY public TRSRY;
 
-    // Epoch duration
+    ERC20 public ohm;
+    ERC20 public dai;
+
+    // Epoch
     uint256 public epochCapacity;
+
+    // next epoch timestamp
+    uint256 public nextEpoch;
     
     // Amount of DAI to sell
     uint256 public bidCapacity;
@@ -32,8 +50,12 @@ contract VolFilter is Owned {
     uint256 public constant FIFTY_PCT = 50e4;
     uint256 public constant PCT_UNITS = 1e4;
 
-    constructor(Indicators indicators_) Owned(msg.sender) {
+    uint256 public immutable numIntervals; // TWAMM intervals for one 1 epoch
+
+    constructor(Indicators indicators_, address dai_) Owned(msg.sender) {
         indicators = indicators_;
+        numIntervals = 8 hours / pair.orderTimeInterval();
+        dai = ERC20(dai_);
     }
 
     // Called at rebase
@@ -52,22 +74,28 @@ contract VolFilter is Owned {
         if (pctBandOfPrice > HUNDRED_PCT) pctBandOfPrice = HUNDRED_PCT;
         
         // Check if current price is above minimum threshold above/below SMA to trigger market ops
-        // If in top range (>50%), sell OHM. Otherwise, buy OHM.
-        uint256 order;
-        bool isBid;
+        // If in top range (>50%), mint and sell OHM. If in bottom range (<50%), withdraw DAI and buy OHM.
         if (pctBandOfPrice > FIFTY_PCT + minPctThreshold) {
             uint256 capacityPct = (pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
-            order = askCapacity * capacityPct / PCT_UNITS;
+            uint256 orderSize = askCapacity * capacityPct / PCT_UNITS;
 
-            // TODO initiate OHM sell order for order amount until next epoch
-        }
-        else if (pctBandOfPrice < FIFTY_PCT - minPctThreshold) {
+            // Mint enough OHM to sell
+            MINTR.mintTo(address(this), orderSize);
+
+            // Initiate OHM sell order for order amount until next epoch
+            pair.longTermSwapFrom0To1(orderSize, numIntervals);
+
+        } else if (pctBandOfPrice < FIFTY_PCT - minPctThreshold) {
+            // Trigger buy/sell if %Band is below threshold
             uint256 capacityPct = (HUNDRED_PCT - pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
-            order = bidCapacity * capacityPct / PCT_UNITS;
-            isBid = true;
+            uint256 orderSize = bidCapacity * capacityPct / PCT_UNITS;
+
+            TRSRY.withdrawReserves(address(this), dai, orderSize);
+
+            // Buy OHM for order amount until next epoch
+            pair.longTermSwapFrom1To0(orderSize, numIntervals);
         }
 
-        // Trigger buy/sell if %Band is below threshold
     }
 
     function setEpochCapacity(uint256 epochCapacity_) public onlyOwner {
