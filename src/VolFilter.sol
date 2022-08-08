@@ -17,6 +17,7 @@ interface ITRSRY {
 }
 
 error VolFilter_InvalidParam();
+error VolFilter_TooEarly();
 
 contract VolFilter is Owned {
     using FixedPointMathLib for uint256;
@@ -32,8 +33,8 @@ contract VolFilter is Owned {
     // Epoch
     uint256 public epochCapacity;
 
-    // next epoch timestamp
-    uint256 public nextEpoch;
+    uint256 public nextEpochTimestamp;
+    uint256 public epochDuration;
     
     // Amount of DAI to sell
     uint256 public bidCapacity;
@@ -42,7 +43,7 @@ contract VolFilter is Owned {
     uint256 public askCapacity;
 
     // Bollinger Bands multiple. Defines maximum standard deviations that system will respond to. Must be <3.
-    uint256 public bbandMultiple;
+    uint256 public maxBandMultiple;
 
     // Threshold of %Band to trigger a buy/sell. Out of 100. 1e4. 50% +/- minPctThreshold
     uint256 public minPctThreshold;
@@ -50,24 +51,31 @@ contract VolFilter is Owned {
     uint256 public constant FIFTY_PCT = 50e4;
     uint256 public constant PCT_UNITS = 1e4;
 
-    uint256 public immutable numIntervals; // TWAMM intervals for one 1 epoch
+    uint256 public numIntervals; // TWAMM intervals for one order
 
     constructor(Indicators indicators_, address dai_) Owned(msg.sender) {
         indicators = indicators_;
-        numIntervals = 8 hours / pair.orderTimeInterval();
         dai = ERC20(dai_);
+        nextEpochTimestamp = 0;
+    }
+
+    function setNumEpochsPerOrder(uint256 duration_) external {
+        epochDuration = duration_;
+        numIntervals = duration_ / pair.orderTimeInterval();
     }
 
     // Called at rebase
     function update() external {
+        if (block.timestamp < nextEpochTimestamp) revert VolFilter_TooEarly();
+
         // TODO can combine these into one call
         uint256 sma = indicators.getMovingAverage();
         uint256 stdDev = indicators.getStandardDeviation();
         uint256 currentPrice = indicators.getCurrentPrice();
 
         // Calculate BBands
-        uint256 upperBand = sma + (stdDev * bbandMultiple);
-        uint256 lowerBand = sma - (stdDev * bbandMultiple);
+        uint256 upperBand = sma + (stdDev * maxBandMultiple);
+        uint256 lowerBand = sma - (stdDev * maxBandMultiple);
 
         // Calculate %Band of current price
         uint256 pctBandOfPrice = ((currentPrice - lowerBand) / (upperBand - lowerBand)) * 1e4;
@@ -96,6 +104,7 @@ contract VolFilter is Owned {
             pair.longTermSwapFrom1To0(orderSize, numIntervals);
         }
 
+        nextEpochTimestamp += epochDuration;
     }
 
     function setEpochCapacity(uint256 epochCapacity_) public onlyOwner {
@@ -112,9 +121,9 @@ contract VolFilter is Owned {
         askCapacity = askCapacity_;
     }
 
-    function setBands(uint256 multiple_) external onlyOwner {
+    function setMaxBandMultiple(uint256 multiple_) external onlyOwner {
         if (multiple_ < 1 || multiple_ > 3) revert VolFilter_InvalidParam();
-        bbandMultiple = multiple_;
+        maxBandMultiple = multiple_;
     }
 
     function setMinPctThreshold(uint256 minPct_) external onlyOwner {
