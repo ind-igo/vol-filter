@@ -13,12 +13,17 @@ interface IMINTR {
 }
 
 interface ITRSRY {
-    function withdrawReserves(address to_, ERC20 token_, uint256 amount_) external;
+    function withdrawReserves(
+        address to_,
+        ERC20 token_,
+        uint256 amount_
+    ) external;
 }
 
 error VolFilter_InvalidParam();
 error VolFilter_TooEarly();
 
+// TODO Add band smoothing. Add minimum absolute volatility to act upon
 contract VolFilter is Owned {
     using FixedPointMathLib for uint256;
 
@@ -31,11 +36,9 @@ contract VolFilter is Owned {
     ERC20 public dai;
 
     // Epoch
-    uint256 public epochCapacity;
-
     uint256 public nextEpochTimestamp;
     uint256 public epochDuration;
-    
+
     // Amount of DAI to sell
     uint256 public bidCapacity;
 
@@ -59,56 +62,50 @@ contract VolFilter is Owned {
         nextEpochTimestamp = 0;
     }
 
-    function setNumEpochsPerOrder(uint256 duration_) external {
-        epochDuration = duration_;
-        numIntervals = duration_ / pair.orderTimeInterval();
-    }
-
     // Called at rebase
     function update() external {
         if (block.timestamp < nextEpochTimestamp) revert VolFilter_TooEarly();
 
-        // TODO can combine these into one call
-        uint256 sma = indicators.getMovingAverage();
-        uint256 stdDev = indicators.getStandardDeviation();
-        uint256 currentPrice = indicators.getCurrentPrice();
+        // Update indicator data, then use updated data
+        (uint256 currentPrice, uint256 sma uint256 stdDev) = indicators.updateIndicators();
 
         // Calculate BBands
         uint256 upperBand = sma + (stdDev * maxBandMultiple);
         uint256 lowerBand = sma - (stdDev * maxBandMultiple);
 
         // Calculate %Band of current price
-        uint256 pctBandOfPrice = ((currentPrice - lowerBand) / (upperBand - lowerBand)) * 1e4;
-        if (pctBandOfPrice > HUNDRED_PCT) pctBandOfPrice = HUNDRED_PCT;
-        
+        uint256 pricePctBBand = ((currentPrice - lowerBand) /
+            (upperBand - lowerBand)) * PCT_UNITS;
+        if (pricePctBBand > HUNDRED_PCT) pricePctBBand = HUNDRED_PCT;
+
         // Check if current price is above minimum threshold above/below SMA to trigger market ops
         // If in top range (>50%), mint and sell OHM. If in bottom range (<50%), withdraw DAI and buy OHM.
-        if (pctBandOfPrice > FIFTY_PCT + minPctThreshold) {
-            uint256 capacityPct = (pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
-            uint256 orderSize = askCapacity * capacityPct / PCT_UNITS;
+        // Orders last until next epoch.
+        if (pricePctBBand > FIFTY_PCT + minPctThreshold) {
+            uint256 capacityPct = (pricePctBBand - FIFTY_PCT) / FIFTY_PCT;
+            uint256 orderSize = (askCapacity * capacityPct) / PCT_UNITS;
 
-            // Mint enough OHM to sell
             MINTR.mintTo(address(this), orderSize);
-
-            // Initiate OHM sell order for order amount until next epoch
             pair.longTermSwapFrom0To1(orderSize, numIntervals);
-
-        } else if (pctBandOfPrice < FIFTY_PCT - minPctThreshold) {
+        } else if (pricePctBBand < FIFTY_PCT - minPctThreshold) {
             // Trigger buy/sell if %Band is below threshold
-            uint256 capacityPct = (HUNDRED_PCT - pctBandOfPrice - FIFTY_PCT) / FIFTY_PCT;
-            uint256 orderSize = bidCapacity * capacityPct / PCT_UNITS;
+            uint256 capacityPct = (HUNDRED_PCT - pricePctBBand - FIFTY_PCT) /
+                FIFTY_PCT;
+            uint256 orderSize = (bidCapacity * capacityPct) / PCT_UNITS;
 
             TRSRY.withdrawReserves(address(this), dai, orderSize);
-
-            // Buy OHM for order amount until next epoch
             pair.longTermSwapFrom1To0(orderSize, numIntervals);
         }
 
         nextEpochTimestamp += epochDuration;
     }
 
-    function setEpochCapacity(uint256 epochCapacity_) public onlyOwner {
-        epochCapacity = epochCapacity_;
+    function setEpochDuration(uint256 duration_) external {
+        epochDuration = duration_;
+        numIntervals = duration_ / pair.orderTimeInterval();
+
+        // NOTE: Reset epoch timestamp. This means update can be called again.
+        nextEpochTimestamp = 0;
     }
 
     // Denominated in OHM (9 decimals)

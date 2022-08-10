@@ -30,11 +30,11 @@ contract Indicators is Owned {
     AggregatorV2V3Interface internal immutable _ohmEthPriceFeed;
     AggregatorV2V3Interface internal immutable _reserveEthPriceFeed;
 
-    /// Moving average data
+    /// @notice Moving average data
     uint256 internal _movingAverage; /// See getMovingAverage()
 
-    // M2 is the sum of the squared differences between the current observation and the moving average.
-    // Used to calculate the standard deviation.
+    /// @notice M2 is the sum of the squared differences between the current observation and the moving average.
+    /// @dev    Used to calculate the standard deviation.
     uint256 internal _m2;
 
     /// @notice Array of price observations. Check nextObsIndex to determine latest data point.
@@ -109,7 +109,7 @@ contract Indicators is Owned {
     ///      The Heart beat frequency should be set to the same value as the observationFrequency.
     // Calculate indicators (simple moving average, variance and std dev) using Welford's Algorithm
     // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-    function updateIndicators() external {
+    function updateIndicators() external returns (uint256, uint256, uint256) {
         if (!initialized) revert Price_NotInitialized();
 
         uint32 numObs = numObservations;
@@ -122,7 +122,12 @@ contract Indicators is Owned {
             : earliestPrice - currentPrice;
 
         // Calculate moving average and variance with new price data
-        (_movingAverage, _m2) = _computeAverageAndM2(numObs, _movingAverage, _m2, diff);
+        (_movingAverage, _m2) = _computeAverageAndM2(
+            numObs,
+            _movingAverage,
+            _m2,
+            diff
+        );
 
         /// Push new observation into storage and store timestamp taken at
         observations[nextObsIndex] = currentPrice;
@@ -130,6 +135,8 @@ contract Indicators is Owned {
         nextObsIndex = (nextObsIndex + 1) % numObs;
 
         emit NewObservation(block.timestamp, currentPrice);
+
+        return (currentPrice, _movingAverage, getStandardDeviation())
     }
 
     /* ========== VIEW FUNCTIONS ========== */
@@ -145,16 +152,18 @@ contract Indicators is Owned {
         {
             (, int256 ohmEthPriceInt, , uint256 updatedAt, ) = _ohmEthPriceFeed
                 .latestRoundData();
+
             /// Use a multiple of observation frequency to determine what is too old to use.
             /// Price feeds will not provide an updated answer if the data doesn't change much.
             /// This would be similar to if the feed just stopped updating; therefore, we need a cutoff.
             if (updatedAt < block.timestamp - 3 * uint256(observationFrequency))
                 revert Price_BadFeed(address(_ohmEthPriceFeed));
+
             ohmEthPrice = uint256(ohmEthPriceInt);
 
-            int256 reserveEthPriceInt;
-            (, reserveEthPriceInt, , updatedAt, ) = _reserveEthPriceFeed
+            (, int256 reserveEthPriceInt, , updatedAt, ) = _reserveEthPriceFeed
                 .latestRoundData();
+
             if (updatedAt < block.timestamp - uint256(observationFrequency))
                 revert Price_BadFeed(address(_reserveEthPriceFeed));
             reserveEthPrice = uint256(reserveEthPriceInt);
@@ -167,28 +176,31 @@ contract Indicators is Owned {
     }
 
     /// @notice Get the last stored price observation of OHM in the Reserve asset
-    function getLastPrice() external view returns (uint256) {
-        /// Revert if not initialized
+    function getLastPrice() public view returns (uint256) {
         if (!initialized) revert Price_NotInitialized();
+
         uint32 lastIndex = nextObsIndex == 0
             ? numObservations - 1
             : nextObsIndex - 1;
+
         return observations[lastIndex];
     }
 
     /// @notice Get the moving average of OHM in the Reserve asset over the defined window (see movingAverageDuration and observationFrequency).
-    function getMovingAverage() external view returns (uint256) {
-        /// Revert if not initialized
+    function getMovingAverage() public view returns (uint256) {
         if (!initialized) revert Price_NotInitialized();
         return _movingAverage;
     }
 
     // Use Welford's Algorithm to calculate the standard deviation from M2
     // More info: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-    function getStandardDeviation() external view returns (uint256) {
-        /// Revert if not initialized
+    function getStandardDeviation() public view returns (uint256) {
         if (!initialized) revert Price_NotInitialized();
         return (_m2 / (numObservations - 1)).sqrt();
+    }
+
+    function getIndicators() external view returns (uint256, uint256, uint256) {
+        return (getCurrentPrice(), getMovingAverage(), getStandardDeviation())
     }
 
     /* ========== ADMIN FUNCTIONS ========== */
@@ -221,7 +233,7 @@ contract Indicators is Owned {
             uint256 obs = startObservations_[i];
             if (obs == 0) revert Price_InvalidParams();
 
-            (avg, m2) = _computeAverageAndM2(i+1, avg, m2, obs);
+            (avg, m2) = _computeAverageAndM2(i + 1, avg, m2, obs);
             observations[i] = obs;
             unchecked {
                 ++i;
@@ -266,9 +278,7 @@ contract Indicators is Owned {
     /// @param    observationFrequency_   Observation frequency in seconds, must be a divisor of the moving average duration
     /// @dev      Changing the observation frequency clears existing observation data since it will not be taken at the right time intervals.
     ///           Ensure that you have saved the existing data and/or can re-populate before calling this function.
-    function changeObservationFrequency(uint48 observationFrequency_)
-        external
-    {
+    function changeObservationFrequency(uint48 observationFrequency_) external {
         /// Moving Average Duration should be divisible by Observation Frequency to get a whole number of observations
         if (
             observationFrequency_ == 0 ||
@@ -305,7 +315,12 @@ contract Indicators is Owned {
     }
 
     // M2 is the sum of the squared differences between the current observation and the moving average.
-    function _computeAverageAndM2(uint256 counter_, uint256 avg_, uint256 m2_, uint256 diff_) internal pure returns (uint256 newAvg, uint256 newM2) {
+    function _computeAverageAndM2(
+        uint256 counter_,
+        uint256 avg_,
+        uint256 m2_,
+        uint256 diff_
+    ) internal pure returns (uint256 newAvg, uint256 newM2) {
         uint256 delta = diff_ - avg_;
         newAvg = avg_ + delta / counter_;
         newM2 = m2_ + delta * (diff_ - newAvg);
